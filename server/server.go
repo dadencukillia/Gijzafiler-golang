@@ -108,7 +108,7 @@ func (this *Server) Run() {
 	}
 }
 
-func (this Server) MinusConnection() {
+func (this *Server) MinusConnection() {
 	this.ConnectionCount--
 }
 
