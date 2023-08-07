@@ -1,10 +1,12 @@
 package client
 
 import (
+	"GijzaFiler/rsacrypto"
 	"GijzaFiler/server"
 	"GijzaFiler/utils"
 	"bufio"
 	"bytes"
+	"crypto/rsa"
 	"encoding/gob"
 	"fmt"
 	"net"
@@ -16,13 +18,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// Default port of server
 const DEFAULTPORT int = 5416
 
-func CollectClientData() (string, int) {
-	ml := utils.Logger{Prefix: ""}
-	ip_port := ml.Input("Enter IP address: ")
+// Parse ip and port from user input
+func GetPortAndIp(inp string) (string, int) {
+	ip_port_splitted := strings.Split(inp, "/")
+	ip_port := ip_port_splitted[len(ip_port_splitted)-1]
+
 	splitted := strings.Split(ip_port, ":")
 	ip := splitted[0]
+
 	var port int
 	if len(splitted) < 2 {
 		port = DEFAULTPORT
@@ -37,16 +43,28 @@ func CollectClientData() (string, int) {
 	return ip, port
 }
 
+// Requires entering the data of client from user
+func CollectClientData() (string, int) {
+	ml := utils.Logger{Prefix: ""}
+
+	ip_port := ml.Input("Enter IP address: ")
+	return GetPortAndIp(ip_port)
+}
+
 type Client struct {
 	Ip         string
 	Port       int
+	PublKey    *rsa.PublicKey
+	PrivKey    *rsa.PrivateKey
 	connection net.Conn
 }
 
+// Create client instance with own data
 func Create(ip string, port int) Client {
-	return Client{Ip: ip, Port: port}
+	return Client{Ip: ip, Port: port, PublKey: nil, PrivKey: nil}
 }
 
+// Connect to server
 func (this *Client) Run() {
 	inf := utils.Logger{Prefix: "client"}
 	errl := utils.Logger{Prefix: "error"}
@@ -54,6 +72,7 @@ func (this *Client) Run() {
 	inf.PPrintln("Connecting to " + address + "...")
 	connection, err := net.Dial("tcp", address)
 	this.connection = connection
+	// Require enter new data when error connect
 	if err != nil {
 		errl.PPrintln("Connection error!")
 		ip, port := CollectClientData()
@@ -62,17 +81,19 @@ func (this *Client) Run() {
 		this.Run()
 		return
 	}
+	// Start client session
 	this.runSession()
 }
 
-func (this Client) runSession() {
+func (this *Client) runSession() {
 	inf := utils.Logger{Prefix: "client"}
 	errl := utils.Logger{Prefix: "error"}
 	con := this.connection
 	inf.PPrintln("Connected!")
-	res, _ := this.ListToMessage([]interface{}{"connect"})
-	con.Write(res)
-	var count int
+	res, _ := this.ListToMessage([]interface{}{"connect"}) // Start message
+	con.Write(res)                                         // Send message
+	var count int = 0
+	// Authing loop
 	for {
 		nmsg, err := this.ReadMessage()
 		if err != nil {
@@ -80,9 +101,57 @@ func (this Client) runSession() {
 			con.Close()
 			return
 		}
+
 		if nmsg[0] == "success" {
+			if count == 0 && this.PublKey == nil {
+				inf.PPrintln("⚠️ The connection is not protected")
+			}
 			break
+		} else if nmsg[0] == "firstPublicKey" {
+			inf.PPrintln("🔒 The connection is protected by E2EE technology")
+			if key, ok := nmsg[1].([]byte); ok {
+				this.PublKey, err = rsacrypto.BytesToPublicKey(key)
+
+				if err != nil {
+					errl.PPrintln("Suspect connection: " + err.Error())
+					con.Close()
+					return
+				}
+
+				// Generating key for server
+				var publKeyToSend *rsa.PublicKey // We want send this key to server
+				this.PrivKey, publKeyToSend, _ = rsacrypto.GenerateKeyPair(rsacrypto.KeySize)
+				publKeyToSendInString, _ := rsacrypto.PublicKeyToBytes(publKeyToSend)
+
+				list := []interface{}{"publicKey", publKeyToSendInString}
+				toSend, _ := this.ListToMessage(list)
+				con.Write(toSend)
+			} else {
+				errl.PPrintln("Suspect connection: " + err.Error())
+				con.Close()
+				return
+			}
+		} else if nmsg[0] == "secondPublicKey" {
+			if key, ok := nmsg[1].([]byte); ok {
+				this.PublKey, err = rsacrypto.BytesToPublicKey(key)
+				if err != nil {
+					errl.PPrintln("Suspect connection: " + err.Error())
+					con.Close()
+					return
+				}
+
+				list := []interface{}{"connect"}
+				toSend, _ := this.ListToMessage(list)
+				con.Write(toSend)
+			} else {
+				errl.PPrintln("Suspect connection: " + err.Error())
+				con.Close()
+				return
+			}
 		} else if nmsg[0] == "enter_password" {
+			if this.PublKey == nil {
+				inf.PPrintln("⚠️ The connection is not protected")
+			}
 			if c, ok := nmsg[1].(int); ok {
 				count = int(c)
 				inf.PPrintln("The server requires entering " + fmt.Sprint(nmsg[1]) + " passwords for access")
@@ -111,10 +180,10 @@ func (this Client) runSession() {
 			con.Write(toSend)
 		}
 	}
-	this.authedSession()
+	this.authedSession() // Continue session of authed client
 }
 
-func (this Client) authedSession() {
+func (this *Client) authedSession() {
 	con := this.connection
 	inf := utils.Logger{Prefix: "client"}
 	errl := utils.Logger{Prefix: "error"}
@@ -122,14 +191,15 @@ func (this Client) authedSession() {
 	inf.Println("")
 	inf.Println("Type \"help\" to get a list of available functions")
 	var path []string = []string{"."}
+	// Cycle of user commands
 	for {
 		cmd := inf.Input("/$ ")
 		splitted := strings.Split(cmd, " ")
-		if splitted[0] == "help" { // prints functions hint
+		if splitted[0] == "help" { // Prints functions hint
 			inf.Println("• help\n• neofetch\n• ls\n• cd <folder name>\n• pwd\n• wget <folder or file name>\n• cat <file name>\n• disconnect\n• exit")
 		} else if splitted[0] == "neofetch" { // prints gijzafiler logo
 			inf.DrawLogo()
-		} else if splitted[0] == "ls" { // prints list of files and folders in current folder
+		} else if splitted[0] == "ls" { // Prints list of files and folders in current folder
 			res, _ := this.ListToMessage([]interface{}{"get_folders", strings.Join(path[1:], "/")})
 			_, err := con.Write(res)
 			if err != nil {
@@ -188,7 +258,7 @@ func (this Client) authedSession() {
 			} else {
 				inf.Println("Nothing here")
 			}
-		} else if splitted[0] == "cd" && len(splitted) > 1 { // changes current directory
+		} else if splitted[0] == "cd" && len(splitted) > 1 { // Changes current directory
 			name := strings.Join(splitted[1:], " ")
 			if name == ".." {
 				if len(path) <= 1 {
@@ -227,9 +297,9 @@ func (this Client) authedSession() {
 				path = append(path, name)
 				inf.Println("Successfully!")
 			}
-		} else if splitted[0] == "pwd" { // prints current path
+		} else if splitted[0] == "pwd" { // Prints current path
 			inf.Println(strings.Join(path, "/"))
-		} else if splitted[0] == "wget" && len(splitted) > 1 { // download file or folder
+		} else if splitted[0] == "wget" && len(splitted) > 1 { // Download file or folder
 			file_or_dir_name := strings.Join(splitted[1:], " ")
 			if file_or_dir_name != "." {
 				file_or_dir_path_splitted := []string{}
@@ -399,7 +469,7 @@ func (this Client) authedSession() {
 				inf.Println("Folders were downloaded: " + fmt.Sprint(dir_count-dir_skip_count) + "/" + fmt.Sprint(dir_count))
 				inf.Println("Files were downloaded: " + fmt.Sprint(files_count-files_skip_count) + "/" + fmt.Sprint(files_count))
 			}
-		} else if splitted[0] == "cat" && len(splitted) > 1 {
+		} else if splitted[0] == "cat" && len(splitted) > 1 { // Prints content of file
 			file_or_dir_name := strings.Join(splitted[1:], " ")
 			file_or_dir_path_splitted := []string{}
 			file_or_dir_path_splitted = append(file_or_dir_path_splitted, path[1:]...)
@@ -430,20 +500,21 @@ func (this Client) authedSession() {
 				errl.PPrintln(file_or_dir_name + " is not a file!")
 				continue
 			}
-		} else if splitted[0] == "disconnect" { // disconnects from server
+		} else if splitted[0] == "disconnect" { // Disconnects from server
 			con.Close()
 			utils.ClearTerminal()
 			StarterMenu()
 			return
-		} else if splitted[0] == "exit" { // disconnects and exits
+		} else if splitted[0] == "exit" { // Disconnects and exits
 			con.Close()
 			return
-		} else { // not listened
+		} else { // Not listened
 			errl.PPrintln("Unknown command")
 		}
 	}
 }
 
+// Check if var a contains in slice
 func sliceContainsValue(slice []any, a any) bool {
 	for _, u := range slice {
 		if u == a {
@@ -453,19 +524,42 @@ func sliceContainsValue(slice []any, a any) bool {
 	return false
 }
 
-func (this Client) ReadMessage() ([]interface{}, error) {
+// Set private key
+func (this *Client) SetPrivateKey(pk *rsa.PrivateKey) {
+	this.PrivKey = pk
+}
+
+// Set public key
+func (this *Client) SetPublicKey(pk *rsa.PublicKey) {
+	this.PublKey = pk
+}
+
+// Receiving message from server
+func (this *Client) ReadMessage() ([]interface{}, error) {
 	reader := bufio.NewReader(this.connection)
 	message := make([]byte, 0)
 
+	var chunkSize = 2097152
+
+	if this.PrivKey != nil {
+		chunkSize *= rsacrypto.KeySize / 64
+	}
+
 	for {
-		buf := make([]byte, 1024)
+		buf := make([]byte, chunkSize) // Chunk is equals 2 mib
 		n, err := reader.Read(buf)
 		if err != nil {
 			return []interface{}{}, err
 		}
 		message = append(message, buf[:n]...)
-		if n < 1024 {
+		if n < chunkSize {
 			break
+		}
+		if this.PrivKey != nil {
+			_, err := rsacrypto.DecryptWithPrivateKey(message, this.PrivKey)
+			if err != nil {
+				continue
+			}
 		}
 		var ls []interface{}
 		var buffer bytes.Buffer
@@ -477,6 +571,14 @@ func (this Client) ReadMessage() ([]interface{}, error) {
 		} else {
 			break
 		}
+	}
+
+	if this.PrivKey != nil {
+		msg, err := rsacrypto.DecryptWithPrivateKey(message, this.PrivKey)
+		if err != nil {
+			return []interface{}{}, err
+		}
+		message = msg
 	}
 
 	var ret []interface{}
@@ -491,18 +593,28 @@ func (this Client) ReadMessage() ([]interface{}, error) {
 	return ret, nil
 }
 
-func (this Client) ListToMessage(list []interface{}) ([]byte, error) {
+// Converting data to bytes for sending
+func (this *Client) ListToMessage(list []interface{}) ([]byte, error) {
 	var buff bytes.Buffer
 	encoder := gob.NewEncoder(&buff)
 	err := encoder.Encode(list)
 	if err != nil {
 		return []byte{}, err
 	}
-	return buff.Bytes(), nil
+	ret := buff.Bytes()
+	if this.PublKey != nil {
+		enc, err := rsacrypto.EncryptWithPublicKey(ret, this.PublKey)
+		if err != nil {
+			return []byte{}, err
+		}
+		return enc, nil
+	}
+	return ret, nil
 }
 
-// import cycle problem
+//=== import cycle problem ===\\
 
+// Print start menu
 func StarterMenu() {
 	ml := utils.Logger{Prefix: ""}
 	errl := utils.Logger{Prefix: "Error"}
@@ -526,6 +638,7 @@ func StarterMenu() {
 	}
 }
 
+// Handling user input server or client mode
 func starterHandler(sel int) {
 	if sel == 1 {
 		serv := server.Create(server.CollectServerData())
