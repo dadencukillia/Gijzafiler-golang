@@ -3,7 +3,6 @@
 package rsacrypto
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha512"
@@ -12,7 +11,6 @@ import (
 )
 
 const KeySize = 2048
-const Limiter = "\n\t"
 
 // Generates private and public key
 func GenerateKeyPair(bits int) (*rsa.PrivateKey, *rsa.PublicKey, error) {
@@ -65,17 +63,17 @@ func EncryptWithPublicKey(msg []byte, pub *rsa.PublicKey) ([]byte, error) {
 
 	// Chunk the message into smaller parts
 	var chunkSize = pub.N.BitLen()/8 - 2*hash.Size() - 2
-	var encryptedChunks [][]byte
+	var result []byte
 	chunks := chunkBy[byte](msg, chunkSize)
 	for _, chunk := range chunks {
 		ciphertext, err := rsa.EncryptOAEP(hash, rand.Reader, pub, chunk, nil)
 		if err != nil {
 			return []byte{}, err
 		}
-		encryptedChunks = append(encryptedChunks, ciphertext)
+		result = append(result, ciphertext...)
 	}
 
-	return bytes.Join(encryptedChunks, []byte(Limiter)), nil
+	return result, nil
 }
 
 // Decrypt message using private key
@@ -83,7 +81,7 @@ func DecryptWithPrivateKey(ciphertext []byte, priv *rsa.PrivateKey) ([]byte, err
 	hash := sha512.New()
 	dec_msg := []byte("")
 
-	for _, chnk := range bytes.Split(ciphertext, []byte(Limiter)) {
+	for _, chnk := range chunkBy[byte](ciphertext, priv.N.BitLen()/8) {
 		plaintext, err := rsa.DecryptOAEP(hash, rand.Reader, priv, chnk, nil)
 		if err != nil {
 			return []byte{}, err
@@ -96,16 +94,16 @@ func DecryptWithPrivateKey(ciphertext []byte, priv *rsa.PrivateKey) ([]byte, err
 
 // Example
 func main() {
-	msg := "Hello, world!"
-	PrKey, PubKey, _ := GenerateKeyPair(2048)
-	prkstr := PrivateKeyToBytes(PrKey)
-	fmt.Println("PrivateKey: ", string(prkstr))
-	pbkstr, _ := PublicKeyToBytes(PubKey)
-	fmt.Println("PublicKey: ", string(pbkstr))
-	dePub, _ := BytesToPublicKey(pbkstr)
-	enc, _ := EncryptWithPublicKey([]byte(msg), dePub)
-	fmt.Println("Encrypted: ", string(enc))
-	dePrv, _ := BytesToPrivateKey(prkstr)
-	dec, _ := DecryptWithPrivateKey(enc, dePrv)
-	fmt.Println("Decrypted: ", string(dec))
+	msg := "Hello, world!"                             // Message to encryption
+	PrKey, PubKey, _ := GenerateKeyPair(2048)          // Private and Public key generated
+	prkstr := PrivateKeyToBytes(PrKey)                 // Private and Public key generated
+	fmt.Println("PrivateKey: ", string(prkstr))        // Print serialized private key
+	pbkstr, _ := PublicKeyToBytes(PubKey)              // Serialize public key
+	fmt.Println("PublicKey: ", string(pbkstr))         // Print serialized public key
+	dePub, _ := BytesToPublicKey(pbkstr)               // Deserialize public key
+	enc, _ := EncryptWithPublicKey([]byte(msg), dePub) // Encrypt message with deserialized public key
+	fmt.Println("Encrypted: ", string(enc))            // Show encrypted message
+	dePrv, _ := BytesToPrivateKey(prkstr)              // Show encrypted message
+	dec, _ := DecryptWithPrivateKey(enc, dePrv)        // Decrypt message with deserialized private key
+	fmt.Println("Decrypted: ", string(dec))            // Show decrypted key
 }

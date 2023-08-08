@@ -539,14 +539,14 @@ func (this *Client) ReadMessage() ([]interface{}, error) {
 	reader := bufio.NewReader(this.connection)
 	message := make([]byte, 0)
 
-	var chunkSize = 2097152
+	var chunkSize = 2097152 // Chunk is equals 2 mib
 
 	if this.PrivKey != nil {
-		chunkSize *= rsacrypto.KeySize / 64
+		chunkSize *= rsacrypto.KeySize / 32
 	}
 
 	for {
-		buf := make([]byte, chunkSize) // Chunk is equals 2 mib
+		buf := make([]byte, chunkSize)
 		n, err := reader.Read(buf)
 		if err != nil {
 			return []interface{}{}, err
